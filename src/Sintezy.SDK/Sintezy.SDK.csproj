@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>Sintezy.SDK</RootNamespace>
+    <AssemblyName>Sintezy.SDK</AssemblyName>
+    
+    <!-- Package Info -->
+    <PackageId>Sintezy.SDK</PackageId>
+    <Version>0.1.0</Version>
+    <Authors>Sintezy</Authors>
+    <Company>Sintezy</Company>
+    <Description>SDK C# oficial para integração com a API Sintezy</Description>
+    <PackageTags>sintezy;sdk;api;healthcare;medical</PackageTags>
+    <PackageProjectUrl>https://github.com/sintezy/sintezy-sdk-csharp</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/sintezy/sintezy-sdk-csharp</RepositoryUrl>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    
+    <!-- Build Options -->
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="../../README.md" Pack="true" PackagePath="/" />
+  </ItemGroup>
+
+</Project>
