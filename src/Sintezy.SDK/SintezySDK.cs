@@ -190,6 +190,29 @@ namespace Sintezy.SDK
             })!;
         }
 
+        /// <summary>
+        /// Consulta o status da assinatura de um email.
+        /// Disponível apenas para API Keys do tipo unauthenticated (reseller).
+        /// </summary>
+        public async Task<SubscriptionStatus> GetSubscriptionStatusAsync(string email)
+        {
+            await EnsureAuthenticatedAsync();
+
+            _httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", _token!.AccessToken);
+            var response = await _httpClient.GetAsync($"{_baseUrl}/sdk/subscription-status?email={Uri.EscapeDataString(email)}");
+            var responseContent = await response.Content.ReadAsStringAsync();
+
+            if (!response.IsSuccessStatusCode)
+            {
+                throw new SintezySDKException($"Erro ao consultar status da assinatura: {responseContent}", (int)response.StatusCode);
+            }
+
+            return JsonSerializer.Deserialize<SubscriptionStatus>(responseContent, new JsonSerializerOptions
+            {
+                PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+            })!;
+        }
+
         public void Dispose()
         {
             _httpClient.Dispose();
@@ -249,6 +272,19 @@ namespace Sintezy.SDK
         public string SecureId { get; set; } = "";
         public string Type { get; set; } = "";
         public DateTime CreatedAt { get; set; }
+    }
+
+    /// <summary>
+    /// Status da assinatura de um email.
+    /// </summary>
+    public class SubscriptionStatus
+    {
+        public string Email { get; set; } = "";
+        public bool HasSubscription { get; set; }
+        public string? Status { get; set; }
+        public string? PlanType { get; set; }
+        public DateTime? EndDate { get; set; }
+        public string? CheckoutUrl { get; set; }
     }
 
     /// <summary>
