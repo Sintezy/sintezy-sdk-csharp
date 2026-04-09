@@ -191,6 +191,28 @@ namespace Sintezy.SDK
         }
 
         /// <summary>
+        /// Busca a transcrição de uma consulta.
+        /// </summary>
+        public async Task<TranscriptionResult> GetTranscriptionAsync(string secureId)
+        {
+            await EnsureAuthenticatedAsync();
+
+            _httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", _token!.AccessToken);
+            var response = await _httpClient.GetAsync($"{_baseUrl}/sdk/appointments/{secureId}/transcription");
+            var responseContent = await response.Content.ReadAsStringAsync();
+
+            if (!response.IsSuccessStatusCode)
+            {
+                throw new SintezySDKException($"Erro ao buscar transcrição: {responseContent}", (int)response.StatusCode);
+            }
+
+            return JsonSerializer.Deserialize<TranscriptionResult>(responseContent, new JsonSerializerOptions
+            {
+                PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+            })!;
+        }
+
+        /// <summary>
         /// Consulta o status da assinatura de um email.
         /// Disponível apenas para API Keys do tipo unauthenticated (reseller).
         /// </summary>
@@ -272,6 +294,17 @@ namespace Sintezy.SDK
         public string SecureId { get; set; } = "";
         public string Type { get; set; } = "";
         public DateTime CreatedAt { get; set; }
+    }
+
+    /// <summary>
+    /// Resultado da transcrição de uma consulta.
+    /// </summary>
+    public class TranscriptionResult
+    {
+        public string SecureId { get; set; } = "";
+        public string? Transcription { get; set; }
+        public int? RecordedTimeSeconds { get; set; }
+        public string Status { get; set; } = "";
     }
 
     /// <summary>

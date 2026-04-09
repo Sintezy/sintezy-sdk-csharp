@@ -9,7 +9,7 @@
     
     <!-- Package Info -->
     <PackageId>Sintezy.SDK</PackageId>
-    <Version>0.1.0</Version>
+    <Version>0.1.2</Version>
     <Authors>Sintezy</Authors>
     <Company>Sintezy</Company>
     <Description>SDK C# oficial para integração com a API Sintezy</Description>
