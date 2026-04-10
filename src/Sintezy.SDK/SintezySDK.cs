@@ -72,13 +72,17 @@ namespace Sintezy.SDK
         {
             await EnsureAuthenticatedAsync();
 
-            var body = new
+            var body = new Dictionary<string, object>
             {
-                layoutId = parameters.LayoutId,
-                userName = parameters.UserName,
-                userPhone = parameters.UserPhone,
-                layout = parameters.Layout?.Fields ?? new Dictionary<string, object>()
+                ["layoutId"] = parameters.LayoutId,
+                ["userName"] = parameters.UserName,
+                ["userPhone"] = parameters.UserPhone,
+                ["layout"] = parameters.Layout?.Fields ?? new Dictionary<string, object>()
             };
+            if (!string.IsNullOrEmpty(parameters.RedirectUrl))
+            {
+                body["redirectUrl"] = parameters.RedirectUrl;
+            }
 
             var json = JsonSerializer.Serialize(body);
             var content = new StringContent(json, Encoding.UTF8, "application/json");
@@ -329,6 +333,10 @@ namespace Sintezy.SDK
         public string UserName { get; set; } = "";
         public string UserPhone { get; set; } = "";
         public Layout? Layout { get; set; }
+        /// <summary>
+        /// URL de redirecionamento após geração do documento. Se fornecida, o portal redireciona para esta URL ao invés de fechar a janela.
+        /// </summary>
+        public string? RedirectUrl { get; set; }
 
         public static CreateAppointmentParamsBuilder Builder() => new CreateAppointmentParamsBuilder();
     }
@@ -358,6 +366,12 @@ namespace Sintezy.SDK
         public CreateAppointmentParamsBuilder WithLayout(Layout layout)
         {
             _params.Layout = layout;
+            return this;
+        }
+
+        public CreateAppointmentParamsBuilder WithRedirectUrl(string redirectUrl)
+        {
+            _params.RedirectUrl = redirectUrl;
             return this;
         }
 
