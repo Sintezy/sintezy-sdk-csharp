@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text;
@@ -11,9 +12,49 @@ namespace Sintezy.SDK
 {
     /// <summary>
     /// SDK C# oficial para integração com a API Sintezy.
+    ///
+    /// <example>
+    /// <code>
+    /// using var sdk = new SintezySDK("client-id", "client-secret");
+    ///
+    /// var appointment = await sdk.CreateAppointmentAsync(
+    ///     CreateAppointmentParams.Builder()
+    ///         .WithUserEmail("medico@clinica.com")
+    ///         .WithUserName("Dr. João Silva")
+    ///         .WithLayout(Layout.Builder()
+    ///             .WithField("Queixa Principal", "inserir aqui...")
+    ///             .WithField("Conduta", "inserir aqui...")
+    ///             .Build())
+    ///         .Build());
+    ///
+    /// Console.WriteLine(appointment.PortalUrl);
+    /// </code>
+    /// </example>
     /// </summary>
     public class SintezySDK : IDisposable
     {
+        /// <summary>
+        /// Tipos servidos pelos modelos padrão da Sintezy. Qualquer outro valor
+        /// em documentType é o nome de um documento seu, e exige o prompt.
+        /// </summary>
+        public static readonly string[] CatalogDocumentTypes =
+        {
+            "document",
+            "anamnese_summary",
+            "clinic_summary",
+            "referral",
+            "exames_call",
+            "prescription",
+            "certificate",
+            "inss_report"
+        };
+
+        private static readonly JsonSerializerOptions JsonOptions = new JsonSerializerOptions
+        {
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+            PropertyNameCaseInsensitive = true
+        };
+
         private readonly string _clientId;
         private readonly string _clientSecret;
         private readonly string _baseUrl;
@@ -24,39 +65,37 @@ namespace Sintezy.SDK
         {
             _clientId = clientId ?? throw new ArgumentNullException(nameof(clientId));
             _clientSecret = clientSecret ?? throw new ArgumentNullException(nameof(clientSecret));
-            _baseUrl = baseUrl ?? "https://api.sintezy.com";
+            _baseUrl = (baseUrl ?? "https://api.sintezy.com").TrimEnd('/');
             _httpClient = new HttpClient();
         }
 
-        /// <summary>
-        /// Autentica o SDK obtendo um token de acesso.
-        /// </summary>
+        // ============================================================
+        // AUTENTICAÇÃO
+        // ============================================================
+
+        /// <summary>Autentica via OAuth 2.0 Client Credentials.</summary>
         public async Task AuthenticateAsync()
         {
-            var content = new FormUrlEncodedContent(new[]
+            var body = new Dictionary<string, object>
             {
-                new KeyValuePair<string, string>("grant_type", "client_credentials"),
-                new KeyValuePair<string, string>("client_id", _clientId),
-                new KeyValuePair<string, string>("client_secret", _clientSecret)
-            });
+                ["grant_type"] = "client_credentials",
+                ["client_id"] = _clientId,
+                ["client_secret"] = _clientSecret
+            };
 
+            var content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json");
             var response = await _httpClient.PostAsync($"{_baseUrl}/oauth/token", content);
             var responseContent = await response.Content.ReadAsStringAsync();
 
             if (!response.IsSuccessStatusCode)
             {
-                throw new SintezySDKException($"Falha na autenticação: {responseContent}", (int)response.StatusCode);
+                throw ToException(responseContent, (int)response.StatusCode, "Falha na autenticação");
             }
 
-            _token = JsonSerializer.Deserialize<AuthToken>(responseContent, new JsonSerializerOptions
-            {
-                PropertyNamingPolicy = JsonNamingPolicy.CamelCase
-            });
+            _token = JsonSerializer.Deserialize<AuthToken>(responseContent, JsonOptions);
         }
 
-        /// <summary>
-        /// Garante que o SDK está autenticado.
-        /// </summary>
+        /// <summary>Autentica se ainda não há token válido.</summary>
         public async Task EnsureAuthenticatedAsync()
         {
             if (_token == null || _token.IsExpired)
@@ -65,189 +104,237 @@ namespace Sintezy.SDK
             }
         }
 
-        /// <summary>
-        /// Cria um novo agendamento.
-        /// </summary>
+        public bool IsAuthenticated => _token != null && !_token.IsExpired;
+
+        // ============================================================
+        // CONSULTAS
+        // ============================================================
+
+        /// <summary>Cria a consulta e devolve a URL do portal de gravação.</summary>
         public async Task<Appointment> CreateAppointmentAsync(CreateAppointmentParams parameters)
         {
-            await EnsureAuthenticatedAsync();
+            if (parameters == null) throw new ArgumentNullException(nameof(parameters));
+            if (string.IsNullOrWhiteSpace(parameters.UserEmail))
+                throw new SintezySDKException("userEmail é obrigatório");
+            if (string.IsNullOrWhiteSpace(parameters.UserName))
+                throw new SintezySDKException("userName é obrigatório");
+            if (parameters.Layout == null || parameters.Layout.Fields.Count == 0)
+                throw new SintezySDKException("layout.fields é obrigatório: informe ao menos um campo da anamnese");
 
-            var body = new Dictionary<string, object>
+            var body = new Dictionary<string, object?>
             {
-                ["layoutId"] = parameters.LayoutId,
+                ["userEmail"] = parameters.UserEmail,
                 ["userName"] = parameters.UserName,
-                ["userPhone"] = parameters.UserPhone,
-                ["layout"] = parameters.Layout?.Fields ?? new Dictionary<string, object>()
+                ["layout"] = new Dictionary<string, object> { ["fields"] = parameters.Layout.Fields }
             };
-            if (!string.IsNullOrEmpty(parameters.RedirectUrl))
-            {
-                body["redirectUrl"] = parameters.RedirectUrl;
-            }
+            AddIfPresent(body, "userPhone", parameters.UserPhone);
+            AddIfPresent(body, "userOccupation", parameters.UserOccupation);
+            AddIfPresent(body, "userOccupationDoc", parameters.UserOccupationDoc);
+            AddIfPresent(body, "title", parameters.Title);
+            AddIfPresent(body, "type", parameters.Type);
+            AddIfPresent(body, "modality", parameters.Modality);
+            AddIfPresent(body, "notes", parameters.Notes);
+            AddIfPresent(body, "context", parameters.Context);
+            AddIfPresent(body, "redirectUrl", parameters.RedirectUrl);
+            if (parameters.Metadata != null) body["metadata"] = parameters.Metadata;
 
-            var json = JsonSerializer.Serialize(body);
-            var content = new StringContent(json, Encoding.UTF8, "application/json");
-
-            _httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", _token!.AccessToken);
-            var response = await _httpClient.PostAsync($"{_baseUrl}/sdk/appointments", content);
-            var responseContent = await response.Content.ReadAsStringAsync();
-
-            if (!response.IsSuccessStatusCode)
-            {
-                throw new SintezySDKException($"Erro ao criar agendamento: {responseContent}", (int)response.StatusCode);
-            }
-
-            return JsonSerializer.Deserialize<Appointment>(responseContent, new JsonSerializerOptions
-            {
-                PropertyNamingPolicy = JsonNamingPolicy.CamelCase
-            })!;
+            return await RequestAsync<Appointment>(HttpMethod.Post, "/sdk/appointments", body);
         }
 
-        /// <summary>
-        /// Busca um agendamento pelo ID.
-        /// </summary>
-        public async Task<Appointment> GetAppointmentAsync(string secureId)
+        /// <summary>Busca uma consulta pelo secureId.</summary>
+        public async Task<Appointment> GetAppointmentAsync(string appointmentSecureId)
         {
-            await EnsureAuthenticatedAsync();
-
-            _httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", _token!.AccessToken);
-            var response = await _httpClient.GetAsync($"{_baseUrl}/sdk/appointments/{secureId}");
-            var responseContent = await response.Content.ReadAsStringAsync();
-
-            if (!response.IsSuccessStatusCode)
-            {
-                throw new SintezySDKException($"Erro ao buscar agendamento: {responseContent}", (int)response.StatusCode);
-            }
-
-            return JsonSerializer.Deserialize<Appointment>(responseContent, new JsonSerializerOptions
-            {
-                PropertyNamingPolicy = JsonNamingPolicy.CamelCase
-            })!;
+            return await RequestAsync<Appointment>(
+                HttpMethod.Get, $"/sdk/appointments/{Uri.EscapeDataString(appointmentSecureId)}");
         }
 
-        /// <summary>
-        /// Lista todos os agendamentos.
-        /// </summary>
-        public async Task<List<Appointment>> ListAppointmentsAsync()
+        /// <summary>Exclui a consulta (soft delete).</summary>
+        public async Task<DeleteResult> DeleteAppointmentAsync(string appointmentSecureId)
         {
-            await EnsureAuthenticatedAsync();
-
-            _httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", _token!.AccessToken);
-            var response = await _httpClient.GetAsync($"{_baseUrl}/sdk/appointments");
-            var responseContent = await response.Content.ReadAsStringAsync();
-
-            if (!response.IsSuccessStatusCode)
-            {
-                throw new SintezySDKException($"Erro ao listar agendamentos: {responseContent}", (int)response.StatusCode);
-            }
-
-            return JsonSerializer.Deserialize<List<Appointment>>(responseContent, new JsonSerializerOptions
-            {
-                PropertyNamingPolicy = JsonNamingPolicy.CamelCase
-            })!;
+            return await RequestAsync<DeleteResult>(
+                HttpMethod.Delete, $"/sdk/appointments/{Uri.EscapeDataString(appointmentSecureId)}");
         }
 
-        /// <summary>
-        /// Gera um documento para o agendamento.
-        /// </summary>
-        public async Task<Document> GenerateDocumentAsync(string appointmentSecureId, string documentType)
+        /// <summary>Transcrição da consulta, quando a gravação já terminou.</summary>
+        public async Task<TranscriptionResult> GetTranscriptionAsync(string appointmentSecureId)
         {
-            await EnsureAuthenticatedAsync();
-
-            var body = new { appointmentSecureId };
-            var json = JsonSerializer.Serialize(body);
-            var content = new StringContent(json, Encoding.UTF8, "application/json");
-
-            _httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", _token!.AccessToken);
-            var response = await _httpClient.PostAsync($"{_baseUrl}/sdk/documents/{documentType}", content);
-            var responseContent = await response.Content.ReadAsStringAsync();
-
-            if (!response.IsSuccessStatusCode)
-            {
-                throw new SintezySDKException($"Erro ao gerar documento: {responseContent}", (int)response.StatusCode);
-            }
-
-            return JsonSerializer.Deserialize<Document>(responseContent, new JsonSerializerOptions
-            {
-                PropertyNamingPolicy = JsonNamingPolicy.CamelCase
-            })!;
+            return await RequestAsync<TranscriptionResult>(
+                HttpMethod.Get, $"/sdk/appointments/{Uri.EscapeDataString(appointmentSecureId)}/transcription");
         }
 
         /// <summary>
-        /// Lista documentos de um agendamento.
-        /// </summary>
-        public async Task<List<DocumentListItem>> ListDocumentsAsync(string appointmentSecureId)
-        {
-            await EnsureAuthenticatedAsync();
-
-            _httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", _token!.AccessToken);
-            var response = await _httpClient.GetAsync($"{_baseUrl}/sdk/appointments/{appointmentSecureId}/documents");
-            var responseContent = await response.Content.ReadAsStringAsync();
-
-            if (!response.IsSuccessStatusCode)
-            {
-                throw new SintezySDKException($"Erro ao listar documentos: {responseContent}", (int)response.StatusCode);
-            }
-
-            return JsonSerializer.Deserialize<List<DocumentListItem>>(responseContent, new JsonSerializerOptions
-            {
-                PropertyNamingPolicy = JsonNamingPolicy.CamelCase
-            })!;
-        }
-
-        /// <summary>
-        /// Busca a transcrição de uma consulta.
-        /// </summary>
-        public async Task<TranscriptionResult> GetTranscriptionAsync(string secureId)
-        {
-            await EnsureAuthenticatedAsync();
-
-            _httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", _token!.AccessToken);
-            var response = await _httpClient.GetAsync($"{_baseUrl}/sdk/appointments/{secureId}/transcription");
-            var responseContent = await response.Content.ReadAsStringAsync();
-
-            if (!response.IsSuccessStatusCode)
-            {
-                throw new SintezySDKException($"Erro ao buscar transcrição: {responseContent}", (int)response.StatusCode);
-            }
-
-            return JsonSerializer.Deserialize<TranscriptionResult>(responseContent, new JsonSerializerOptions
-            {
-                PropertyNamingPolicy = JsonNamingPolicy.CamelCase
-            })!;
-        }
-
-        /// <summary>
-        /// Consulta o status da assinatura de um email.
-        /// Disponível apenas para API Keys do tipo unauthenticated (reseller).
+        /// Status da assinatura de um médico. Disponível apenas para API Keys
+        /// do tipo unauthenticated (reseller).
         /// </summary>
         public async Task<SubscriptionStatus> GetSubscriptionStatusAsync(string email)
         {
+            return await RequestAsync<SubscriptionStatus>(
+                HttpMethod.Get, $"/sdk/subscription-status?email={Uri.EscapeDataString(email)}");
+        }
+
+        // ============================================================
+        // DOCUMENTOS
+        // ============================================================
+
+        /// <summary>
+        /// Gera um documento de um tipo do catálogo, com o prompt padrão da
+        /// Sintezy. A consulta precisa estar finalizada.
+        /// </summary>
+        public Task<Document> GenerateDocumentAsync(string appointmentSecureId, string documentType)
+        {
+            return GenerateDocumentAsync(
+                appointmentSecureId,
+                new GenerateDocumentParams { DocumentType = documentType });
+        }
+
+        /// <summary>
+        /// Gera um documento da consulta, que precisa estar finalizada.
+        ///
+        /// Combinações aceitas:
+        ///  - DocumentType do catálogo, sozinho: usa o prompt padrão.
+        ///  - DocumentType do catálogo + prompt: mesmo tipo, com o SEU prompt.
+        ///    Continua sendo `clinic_summary` e é buscado por esse tipo.
+        ///  - DocumentType com nome próprio + prompt: documento fora do catálogo.
+        ///  - Só o prompt: idem, gravado com o nome `custom`.
+        /// </summary>
+        public async Task<Document> GenerateDocumentAsync(
+            string appointmentSecureId,
+            GenerateDocumentParams parameters)
+        {
+            if (parameters == null) throw new ArgumentNullException(nameof(parameters));
+
+            var hasPrompt = parameters.Contextualization != null || parameters.Format != null;
+            if (hasPrompt && (string.IsNullOrWhiteSpace(parameters.Contextualization) ||
+                              string.IsNullOrWhiteSpace(parameters.Format)))
+            {
+                throw new SintezySDKException("contextualization e format são obrigatórios juntos");
+            }
+            if (string.IsNullOrWhiteSpace(parameters.DocumentType) && !hasPrompt)
+            {
+                throw new SintezySDKException("informe um documentType ou o par contextualization + format");
+            }
+            if (!string.IsNullOrWhiteSpace(parameters.DocumentType) &&
+                !CatalogDocumentTypes.Contains(parameters.DocumentType) && !hasPrompt)
+            {
+                throw new SintezySDKException(
+                    $"\"{parameters.DocumentType}\" não é um tipo do catálogo ({string.Join(", ", CatalogDocumentTypes)}), " +
+                    "então é o nome do seu documento e exige contextualization + format");
+            }
+
+            var body = new Dictionary<string, object?>();
+            AddIfPresent(body, "documentType", parameters.DocumentType);
+            if (hasPrompt)
+            {
+                body["contextualization"] = parameters.Contextualization;
+                body["format"] = parameters.Format;
+            }
+
+            return await RequestAsync<Document>(
+                HttpMethod.Post,
+                $"/sdk/appointments/{Uri.EscapeDataString(appointmentSecureId)}/documents",
+                body);
+        }
+
+        /// <summary>
+        /// Busca um documento já gerado.
+        /// </summary>
+        /// <param name="documentType">
+        /// Tipo do catálogo, ou o nome que você usou ao gerar (`custom` quando
+        /// você não informou nenhum).
+        /// </param>
+        public async Task<Document> GetDocumentAsync(string appointmentSecureId, string documentType)
+        {
+            return await RequestAsync<Document>(
+                HttpMethod.Get,
+                $"/sdk/appointments/{Uri.EscapeDataString(appointmentSecureId)}/documents/{Uri.EscapeDataString(documentType)}");
+        }
+
+        /// <summary>Lista os documentos da consulta e quais já foram gerados.</summary>
+        public async Task<List<DocumentListItem>> ListDocumentsAsync(string appointmentSecureId)
+        {
+            return await RequestAsync<List<DocumentListItem>>(
+                HttpMethod.Get, $"/sdk/appointments/{Uri.EscapeDataString(appointmentSecureId)}/documents");
+        }
+
+        // ============================================================
+        // HELPERS INTERNOS
+        // ============================================================
+
+        private static void AddIfPresent(IDictionary<string, object?> body, string key, string? value)
+        {
+            if (!string.IsNullOrWhiteSpace(value)) body[key] = value;
+        }
+
+        /// <summary>
+        /// Traduz o corpo de erro da API. `message` pode vir string ou array
+        /// (erros de validação do Nest).
+        /// </summary>
+        private static SintezySDKException ToException(string responseContent, int statusCode, string fallback)
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(responseContent);
+                if (doc.RootElement.ValueKind == JsonValueKind.Object)
+                {
+                    foreach (var name in new[] { "message", "error" })
+                    {
+                        if (!doc.RootElement.TryGetProperty(name, out var prop)) continue;
+                        if (prop.ValueKind == JsonValueKind.String)
+                        {
+                            return new SintezySDKException(prop.GetString() ?? fallback, statusCode);
+                        }
+                        if (prop.ValueKind == JsonValueKind.Array)
+                        {
+                            var parts = prop.EnumerateArray().Select(e => e.ToString());
+                            return new SintezySDKException(string.Join("; ", parts), statusCode);
+                        }
+                    }
+                }
+            }
+            catch (JsonException)
+            {
+                // Resposta não-JSON: cai no fallback.
+            }
+
+            return new SintezySDKException($"{fallback}: {responseContent}", statusCode);
+        }
+
+        private async Task<T> RequestAsync<T>(HttpMethod method, string path, object? body = null)
+        {
             await EnsureAuthenticatedAsync();
 
-            _httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", _token!.AccessToken);
-            var response = await _httpClient.GetAsync($"{_baseUrl}/sdk/subscription-status?email={Uri.EscapeDataString(email)}");
+            using var request = new HttpRequestMessage(method, $"{_baseUrl}{path}");
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _token!.AccessToken);
+            if (body != null)
+            {
+                // Serializa pelo tipo em TEMPO DE EXECUÇÃO. Com o genérico, o
+                // System.Text.Json usaria o tipo declarado (object) e enviaria
+                // um corpo vazio.
+                request.Content = new StringContent(
+                    JsonSerializer.Serialize(body, body.GetType(), JsonOptions),
+                    Encoding.UTF8,
+                    "application/json");
+            }
+
+            var response = await _httpClient.SendAsync(request);
             var responseContent = await response.Content.ReadAsStringAsync();
 
             if (!response.IsSuccessStatusCode)
             {
-                throw new SintezySDKException($"Erro ao consultar status da assinatura: {responseContent}", (int)response.StatusCode);
+                throw ToException(responseContent, (int)response.StatusCode, $"Erro em {method} {path}");
             }
 
-            return JsonSerializer.Deserialize<SubscriptionStatus>(responseContent, new JsonSerializerOptions
-            {
-                PropertyNamingPolicy = JsonNamingPolicy.CamelCase
-            })!;
+            return JsonSerializer.Deserialize<T>(responseContent, JsonOptions)!;
         }
 
         public void Dispose()
         {
             _httpClient.Dispose();
+            GC.SuppressFinalize(this);
         }
     }
 
-    /// <summary>
-    /// Token de autenticação.
-    /// </summary>
+    /// <summary>Token de autenticação.</summary>
     public class AuthToken
     {
         [JsonPropertyName("access_token")]
@@ -264,45 +351,44 @@ namespace Sintezy.SDK
         public bool IsExpired => DateTime.UtcNow >= _createdAt.AddSeconds(ExpiresIn - 60);
     }
 
-    /// <summary>
-    /// Dados do agendamento.
-    /// </summary>
+    /// <summary>Dados da consulta.</summary>
     public class Appointment
     {
         public string SecureId { get; set; } = "";
         public string Status { get; set; } = "";
-        public string UserName { get; set; } = "";
-        public string UserPhone { get; set; } = "";
+        public string? Title { get; set; }
+        /// <summary>URL do portal de gravação, para abrir em popup ou iframe.</summary>
         public string PortalUrl { get; set; } = "";
         public DateTime CreatedAt { get; set; }
-        public DateTime? UpdatedAt { get; set; }
     }
 
-    /// <summary>
-    /// Dados do documento.
-    /// </summary>
+    /// <summary>Documento gerado.</summary>
     public class Document
     {
         public string SecureId { get; set; } = "";
+        /// <summary>O tipo com que ficou gravado — use-o no GetDocumentAsync.</summary>
         public string Type { get; set; } = "";
         public JsonElement Content { get; set; }
         public DateTime CreatedAt { get; set; }
         public DateTime? UpdatedAt { get; set; }
     }
 
-    /// <summary>
-    /// Item resumido de documento para listagem.
-    /// </summary>
+    /// <summary>Item da listagem de documentos.</summary>
     public class DocumentListItem
     {
-        public string SecureId { get; set; } = "";
         public string Type { get; set; } = "";
-        public DateTime CreatedAt { get; set; }
+        public bool Exists { get; set; }
+        public DateTime? CreatedAt { get; set; }
     }
 
-    /// <summary>
-    /// Resultado da transcrição de uma consulta.
-    /// </summary>
+    /// <summary>Resultado da exclusão de uma consulta.</summary>
+    public class DeleteResult
+    {
+        public string Message { get; set; } = "";
+        public bool Deleted { get; set; }
+    }
+
+    /// <summary>Transcrição de uma consulta.</summary>
     public class TranscriptionResult
     {
         public string SecureId { get; set; } = "";
@@ -311,9 +397,7 @@ namespace Sintezy.SDK
         public string Status { get; set; } = "";
     }
 
-    /// <summary>
-    /// Status da assinatura de um email.
-    /// </summary>
+    /// <summary>Status da assinatura de um email.</summary>
     public class SubscriptionStatus
     {
         public string Email { get; set; } = "";
@@ -324,18 +408,59 @@ namespace Sintezy.SDK
         public string? CheckoutUrl { get; set; }
     }
 
-    /// <summary>
-    /// Parâmetros para criação de agendamento.
-    /// </summary>
+    /// <summary>Corpo de GenerateDocumentAsync.</summary>
+    public class GenerateDocumentParams
+    {
+        /// <summary>Tipo do catálogo, ou o nome do seu documento.</summary>
+        public string? DocumentType { get; set; }
+        /// <summary>Objetivo, tom, regras e informações obrigatórias.</summary>
+        public string? Contextualization { get; set; }
+        /// <summary>Como o texto deve aparecer: seções, quebras, assinatura.</summary>
+        public string? Format { get; set; }
+
+        public static GenerateDocumentParamsBuilder Builder() => new GenerateDocumentParamsBuilder();
+    }
+
+    public class GenerateDocumentParamsBuilder
+    {
+        private readonly GenerateDocumentParams _params = new GenerateDocumentParams();
+
+        public GenerateDocumentParamsBuilder WithDocumentType(string documentType)
+        {
+            _params.DocumentType = documentType;
+            return this;
+        }
+
+        public GenerateDocumentParamsBuilder WithPrompt(string contextualization, string format)
+        {
+            _params.Contextualization = contextualization;
+            _params.Format = format;
+            return this;
+        }
+
+        public GenerateDocumentParams Build() => _params;
+    }
+
+    /// <summary>Parâmetros para criação de consulta.</summary>
     public class CreateAppointmentParams
     {
-        public string LayoutId { get; set; } = "";
+        public string UserEmail { get; set; } = "";
         public string UserName { get; set; } = "";
-        public string UserPhone { get; set; } = "";
         public Layout? Layout { get; set; }
-        /// <summary>
-        /// URL de redirecionamento após geração do documento. Se fornecida, o portal redireciona para esta URL ao invés de fechar a janela.
-        /// </summary>
+        public string? UserPhone { get; set; }
+        public string? UserOccupation { get; set; }
+        public string? UserOccupationDoc { get; set; }
+        public string? Title { get; set; }
+        /// <summary>NORMAL ou RETORNO.</summary>
+        public string? Type { get; set; }
+        /// <summary>PRESENCIAL ou ONLINE.</summary>
+        public string? Modality { get; set; }
+        /// <summary>Observações pré-consulta.</summary>
+        public string? Notes { get; set; }
+        /// <summary>Histórico do paciente — a IA usa na geração.</summary>
+        public string? Context { get; set; }
+        public Dictionary<string, object>? Metadata { get; set; }
+        /// <summary>Para onde o portal redireciona ao finalizar.</summary>
         public string? RedirectUrl { get; set; }
 
         public static CreateAppointmentParamsBuilder Builder() => new CreateAppointmentParamsBuilder();
@@ -345,9 +470,9 @@ namespace Sintezy.SDK
     {
         private readonly CreateAppointmentParams _params = new CreateAppointmentParams();
 
-        public CreateAppointmentParamsBuilder WithLayoutId(string layoutId)
+        public CreateAppointmentParamsBuilder WithUserEmail(string userEmail)
         {
-            _params.LayoutId = layoutId;
+            _params.UserEmail = userEmail;
             return this;
         }
 
@@ -357,15 +482,63 @@ namespace Sintezy.SDK
             return this;
         }
 
+        public CreateAppointmentParamsBuilder WithLayout(Layout layout)
+        {
+            _params.Layout = layout;
+            return this;
+        }
+
         public CreateAppointmentParamsBuilder WithUserPhone(string userPhone)
         {
             _params.UserPhone = userPhone;
             return this;
         }
 
-        public CreateAppointmentParamsBuilder WithLayout(Layout layout)
+        public CreateAppointmentParamsBuilder WithUserOccupation(string userOccupation)
         {
-            _params.Layout = layout;
+            _params.UserOccupation = userOccupation;
+            return this;
+        }
+
+        public CreateAppointmentParamsBuilder WithUserOccupationDoc(string userOccupationDoc)
+        {
+            _params.UserOccupationDoc = userOccupationDoc;
+            return this;
+        }
+
+        public CreateAppointmentParamsBuilder WithTitle(string title)
+        {
+            _params.Title = title;
+            return this;
+        }
+
+        public CreateAppointmentParamsBuilder WithType(string type)
+        {
+            _params.Type = type;
+            return this;
+        }
+
+        public CreateAppointmentParamsBuilder WithModality(string modality)
+        {
+            _params.Modality = modality;
+            return this;
+        }
+
+        public CreateAppointmentParamsBuilder WithNotes(string notes)
+        {
+            _params.Notes = notes;
+            return this;
+        }
+
+        public CreateAppointmentParamsBuilder WithContext(string context)
+        {
+            _params.Context = context;
+            return this;
+        }
+
+        public CreateAppointmentParamsBuilder WithMetadata(Dictionary<string, object> metadata)
+        {
+            _params.Metadata = metadata;
             return this;
         }
 
@@ -378,12 +551,18 @@ namespace Sintezy.SDK
         public CreateAppointmentParams Build() => _params;
     }
 
-    /// <summary>
-    /// Layout com campos dinâmicos.
-    /// </summary>
+    /// <summary>Campo do layout da anamnese: o Content é a instrução para a IA.</summary>
+    public class LayoutField
+    {
+        public string Name { get; set; } = "";
+        public string? Content { get; set; }
+        public int? Position { get; set; }
+    }
+
+    /// <summary>Estrutura da anamnese: um campo por seção do prontuário.</summary>
     public class Layout
     {
-        public Dictionary<string, object> Fields { get; } = new Dictionary<string, object>();
+        public List<LayoutField> Fields { get; } = new List<LayoutField>();
 
         public static LayoutBuilder Builder() => new LayoutBuilder();
     }
@@ -392,31 +571,22 @@ namespace Sintezy.SDK
     {
         private readonly Layout _layout = new Layout();
 
-        public LayoutBuilder WithField(string key, object value)
+        /// <summary>Adiciona um campo; a posição segue a ordem de inclusão.</summary>
+        public LayoutBuilder WithField(string name, string? content = null, int? position = null)
         {
-            _layout.Fields[key] = value;
-            return this;
-        }
-
-        public LayoutBuilder WithFieldsJson(string json)
-        {
-            var dict = JsonSerializer.Deserialize<Dictionary<string, object>>(json);
-            if (dict != null)
+            _layout.Fields.Add(new LayoutField
             {
-                foreach (var kvp in dict)
-                {
-                    _layout.Fields[kvp.Key] = kvp.Value;
-                }
-            }
+                Name = name,
+                Content = content,
+                Position = position ?? _layout.Fields.Count
+            });
             return this;
         }
 
         public Layout Build() => _layout;
     }
 
-    /// <summary>
-    /// Exceção específica do SDK.
-    /// </summary>
+    /// <summary>Exceção específica do SDK.</summary>
     public class SintezySDKException : Exception
     {
         public int StatusCode { get; }
